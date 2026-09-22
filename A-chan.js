@@ -142,11 +142,12 @@ async function achanDecodeJson(response){
   return response;
 }
 
-(function achanInstallFetch(){
-  if(window.__achan_patched || !ACHAN_CONFIG.ENABLED) return;
-  window.__achan_patched = true;
-  const ORIG = window.fetch.bind(window);
-  window.fetch = async function(input, init){
+function achanPatchWindow(w){
+  if(!w || w.__achan_patched || !ACHAN_CONFIG.ENABLED) return;
+  if(typeof w.fetch!=='function') return;
+  w.__achan_patched = true;
+  const ORIG = w.fetch.bind(w);
+  w.fetch = async function(input, init){
     if(init && achanIsChatReq(input, init.body)){
       try { init = Object.assign({}, init, { body: achanPatchOutgoing(init.body) }); } catch(_){}
     }
@@ -156,12 +157,13 @@ async function achanDecodeJson(response){
     if(/json/.test(ct)) { try { return await achanDecodeJson(res); } catch(_){ return res; } }
     return res;
   };
-})();
+}
 
-(function achanInstallXHR(){
-  if(window.__achan_xhr || !ACHAN_CONFIG.ENABLED) return;
-  window.__achan_xhr = true;
-  const Real = window.XMLHttpRequest;
+function achanPatchXHR(w){
+  if(!w || w.__achan_xhr || !ACHAN_CONFIG.ENABLED) return;
+  if(typeof w.XMLHttpRequest!=='function') return;
+  w.__achan_xhr = true;
+  const Real = w.XMLHttpRequest;
   function Patched(){
     const x = new Real(); let url='', body=null;
     const oOpen = x.open.bind(x), oSend = x.send.bind(x);
@@ -172,26 +174,39 @@ async function achanDecodeJson(response){
     };
     return x;
   }
-  window.XMLHttpRequest = Patched;
+  w.XMLHttpRequest = Patched;
+}
+
+(function achanInstallNetwork(){
+  const w = (typeof window!=='undefined') ? window : null;
+  try{ achanPatchWindow(w); }catch(_){}
+  try{ achanPatchXHR(w); }catch(_){}
+  try{ if(w && w.parent && w.parent!==w){ achanPatchWindow(w.parent); achanPatchXHR(w.parent); } }catch(_){}
 })();
 
 (function achanInstallTavernHelper(){
   if(!ACHAN_CONFIG.ENABLED || !ACHAN_CONFIG.INJECT) return;
+  const w = (typeof window!=='undefined') ? window : (typeof globalThis!=='undefined'?globalThis:{});
+  const ctxList = [w];
+  try{ if(w.parent && w.parent!==w) ctxList.push(w.parent); }catch(_){}
+  let fnInject=null, fnEventOn=null, EV=null;
+  for(const c of ctxList){
+    if(typeof c.injectPrompts==='function'){ fnInject=c.injectPrompts; fnEventOn=c.eventOn; EV=c.tavern_events; break; }
+  }
+  if(typeof fnInject!=='function') return;
   const base = (ACHAN_CONFIG.CUSTOM_PROMPT && ACHAN_CONFIG.CUSTOM_PROMPT.trim()) || ACHAN_PROMPT;
   const cipher = achanCipher();
   const content = base + (cipher.inst ? '\n\n'+cipher.inst : '');
   const SID = 'a-chan';
+  let uninjectFn = null;
   function inject(){
     try{
-      if(typeof injectPrompts!=='function') return;
-      if(typeof uninjectPrompts==='function'){ try{ uninjectPrompts([SID]); }catch(_){} }
-      injectPrompts([{ id:SID, position:'in_chat', depth:ACHAN_CONFIG.DEPTH, role:'system', content:content }], { once:false });
+      if(uninjectFn){ try{ uninjectFn(); }catch(_){} uninjectFn=null; }
+      const r = fnInject([{ id:SID, position:'in_chat', depth:ACHAN_CONFIG.DEPTH, role:'system', content:content }], { once:false });
+      if(r && typeof r.uninject==='function') uninjectFn = r.uninject;
     }catch(_){}
   }
-  function onEvt(name){
-    try{ if(typeof eventOn==='function') eventOn(name, inject); }catch(_){}
-  }
-  const EV = (typeof tavern_events!=='undefined' && tavern_events) ? tavern_events : null;
+  function onEvt(name){ try{ if(fnEventOn) fnEventOn(name, inject); }catch(_){} }
   if(EV){
     if(EV.CHAT_CHANGED) onEvt(EV.CHAT_CHANGED);
     if(EV.GENERATION_AFTER_COMMANDS) onEvt(EV.GENERATION_AFTER_COMMANDS);
@@ -200,4 +215,5 @@ async function achanDecodeJson(response){
   }
   inject();
   setTimeout(inject, 800);
+  setTimeout(inject, 2500);
 })();
